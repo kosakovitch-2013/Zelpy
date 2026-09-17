@@ -1,26 +1,25 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -O2
-LDFLAGS = -lX11
+CC      = gcc
+CFLAGS  = -Wall -Wextra -O2
+LDFLAGS = -lX11 -lxcb -Wl,-rpath-link,/usr/lib
+PREFIX  = /usr/local
 
-# Installation paths
-PREFIX ?= /usr/local
-BINDIR ?= $(PREFIX)/bin
+all: zelpy zelpane zelpyctl
 
-# Program name - changed to zelpy
-PROG = zelpy
+zelpy: wm.c animation.c animation.h
+	$(CC) $(CFLAGS) -o zelpy wm.c animation.c $(LDFLAGS)
 
-$(PROG): wm.c animation.c animation.h
-	$(CC) $(CFLAGS) -o $(PROG) wm.c animation.c $(LDFLAGS)
+zelpane: zelpane.c
+	$(CC) $(CFLAGS) -o zelpane zelpane.c $(LDFLAGS)
+
+zelpyctl: zelpyctl.c
+	$(CC) $(CFLAGS) -o zelpyctl zelpyctl.c $(LDFLAGS)
+
+install: all
+	install -Dm755 zelpy    $(DESTDIR)$(PREFIX)/bin/zelpy
+	install -Dm755 zelpane  $(DESTDIR)$(PREFIX)/bin/zelpane
+	install -Dm755 zelpyctl $(DESTDIR)$(PREFIX)/bin/zelpyctl
 
 clean:
-	rm -f $(PROG)
+	rm -f zelpy zelpane zelpyctl
 
-install: $(PROG)
-	mkdir -p $(DESTDIR)$(BINDIR)
-	cp -f $(PROG) $(DESTDIR)$(BINDIR)/
-	chmod 755 $(DESTDIR)$(BINDIR)/$(PROG)
-
-uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/$(PROG)
-
-.PHONY: clean install uninstall
+.PHONY: all install clean

@@ -27,22 +27,18 @@
 #define MAX_OPACITY_RULES 32
 #define ANIMATION_DURATION 200
 
-// Config globals
 static char focus_color[64] = "#ebbcba";
 static char unfocus_color[64] = "#444444";
 static char terminal_cmd[256] = "st";
 static int border_width = BORDER_WIDTH_DEFAULT;
 
-// Startup commands
 static char startup_commands[MAX_STARTUP_CMDS][256];
 static int num_startup_commands = 0;
 
-// Variables
 static char var_names[MAX_VARS][64];
 static char var_values[MAX_VARS][256];
 static int num_vars = 0;
 
-// Opacity rules
 typedef struct {
     char pattern[128];
     double opacity;
@@ -50,7 +46,6 @@ typedef struct {
 static OpacityRule opacity_rules[MAX_OPACITY_RULES];
 static int num_opacity_rules = 0;
 
-// Keybind structure
 enum { ACTION_NONE, ACTION_SPAWN, ACTION_CLOSE, ACTION_TOGGLE_FLOATING, ACTION_TOGGLE_FULLSCREEN, ACTION_QUIT, ACTION_WORKSPACE };
 typedef struct {
     unsigned int mod;
@@ -101,13 +96,21 @@ static Atom net_active_window = None;
 static Atom net_wm_window_type = None;
 static Atom net_wm_window_type_dock = None;
 static Atom net_wm_window_opacity = None;
+static Atom net_wm_strut = None;
+static Atom zelpy_workspace_atom = None;
+static Atom zelpy_cmd_workspace = None;
+static Atom zelpy_cmd_reload = None;
+static Atom zelpy_cmd_retile = None;
+static Atom zelpy_cmd_quit = None;
 
-// Forward declarations
+static int top_offset = 0;
+
 void tile_windows(void);
 int window_exists(Window w);
 void update_focus_from_pointer(void);
 void raise_floating_windows(void);
 int is_floating(Window w);
+int is_dock_window(Window w);
 void add_managed_window(Window w);
 void remove_managed_window(Window w);
 void spawn_startup_commands(void);
@@ -115,6 +118,9 @@ void switch_workspace(int ws);
 const char *get_var_value(const char *name);
 void expand_variables(const char *input, char *output, size_t out_size);
 void apply_opacity_rules(Window w);
+void update_struts(void);
+void raise_docks(void);
+void broadcast_workspace(void);
 
 int xerrorhandler(Display *disp, XErrorEvent *ev) { (void)disp; (void)ev; return 0; }
 
@@ -158,13 +164,8 @@ int window_exists(Window w) {
     return r == 1;
 }
 
-int is_managed_window(Window w) {
-    XWindowAttributes attr;
-    if (!XGetWindowAttributes(dpy, w, &attr)) return 0;
-    if (attr.override_redirect) return 0;
-    if (attr.map_state != IsViewable) return 0;
-
-    // Check for dock window type
+int is_dock_window(Window w) {
+    if (!window_exists(w)) return 0;
     Atom actual_type;
     int actual_format;
     unsigned long nitems, bytes_after;
@@ -174,9 +175,18 @@ int is_managed_window(Window w) {
                            &nitems, &bytes_after, &data) == Success && data) {
         Atom type = *(Atom *)data;
         XFree(data);
-        if (type == net_wm_window_type_dock)
-            return 0;
+        return (type == net_wm_window_type_dock);
     }
+    return 0;
+}
+
+int is_managed_window(Window w) {
+    XWindowAttributes attr;
+    if (!XGetWindowAttributes(dpy, w, &attr)) return 0;
+    if (attr.override_redirect) return 0;
+    if (attr.map_state != IsViewable) return 0;
+
+    if (is_dock_window(w)) return 0;
 
     Window top = get_toplevel(w);
     if (top != w && top != root && top != None) return 0;
@@ -289,6 +299,7 @@ void set_focus_to_window(Window w) {
     } else {
         raise_floating_windows();
     }
+    raise_docks();
 
     focused_window = w;
     update_highlight();
@@ -346,8 +357,71 @@ void raise_floating_windows(void) {
     XFlush(dpy);
 }
 
+void update_struts(void) {
+    top_offset = 0;
+    Window root_ret, parent_ret, *children;
+    unsigned int nchildren;
+    if (!XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren))
+        return;
+
+    for (unsigned int i = 0; i < nchildren; i++) {
+        if (!window_exists(children[i])) continue;
+
+        Atom actual_type;
+        int actual_format;
+        unsigned long nitems, bytes_after;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, children[i], net_wm_strut, 0, 4, False,
+                               XA_CARDINAL, &actual_type, &actual_format,
+                               &nitems, &bytes_after, &data) == Success && data) {
+            if (nitems >= 4) {
+                unsigned long *s = (unsigned long *)data;
+                if (s[2] > 0 && s[2] < (unsigned long)screen_height / 2) {
+                    if ((int)s[2] > top_offset)
+                        top_offset = (int)s[2];
+                }
+            }
+            XFree(data);
+        }
+    }
+    if (children) XFree(children);
+}
+
+void raise_docks(void) {
+    Window root_ret, parent_ret, *children;
+    unsigned int nchildren;
+    if (!XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren))
+        return;
+
+    for (unsigned int i = 0; i < nchildren; i++) {
+        if (!window_exists(children[i])) continue;
+        Atom actual_type;
+        int actual_format;
+        unsigned long nitems, bytes_after;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, children[i], net_wm_window_type, 0, 1, False,
+                               XA_ATOM, &actual_type, &actual_format,
+                               &nitems, &bytes_after, &data) == Success && data) {
+            Atom type = *(Atom *)data;
+            XFree(data);
+            if (type == net_wm_window_type_dock) {
+                XRaiseWindow(dpy, children[i]);
+            }
+        }
+    }
+    XFlush(dpy);
+}
+
+void broadcast_workspace(void) {
+    long ws = current_workspace;
+    XChangeProperty(dpy, root, zelpy_workspace_atom, XA_CARDINAL, 32,
+                    PropModeReplace, (unsigned char *)&ws, 1);
+    XFlush(dpy);
+}
+
 void enter_fullscreen(Window w) {
     if (w == None || w == root || !window_exists(w)) return;
+    if (is_dock_window(w)) return;
     XWindowAttributes attr;
     if (!XGetWindowAttributes(dpy, w, &attr)) return;
 
@@ -382,7 +456,7 @@ void exit_fullscreen(Window w) {
 
 void toggle_fullscreen(void) {
     Window w = get_window_under_cursor();
-    if (w == None || w == root || !window_exists(w)) return;
+    if (w == None || w == root || !window_exists(w) || is_dock_window(w)) return;
     if (fullscreen_window == w) {
         exit_fullscreen(w);
     } else {
@@ -403,6 +477,8 @@ void toggle_fullscreen(void) {
 void close_window(Window w) {
     w = get_toplevel(w);
     if (w == None || w == root || !window_exists(w)) return;
+    if (is_dock_window(w)) return;
+
     Atom *protocols;
     int num;
     int has_delete = 0;
@@ -434,7 +510,7 @@ void close_window(Window w) {
 
 void toggle_floating(void) {
     Window w = get_window_under_cursor();
-    if (w == None || w == root || !window_exists(w)) return;
+    if (w == None || w == root || !window_exists(w) || is_dock_window(w)) return;
     if (is_floating(w)) {
         remove_floating(w);
         tile_windows();
@@ -444,7 +520,7 @@ void toggle_floating(void) {
         int fw = screen_width / 3;
         int fh = screen_height / 3;
         int fx = (screen_width - fw) / 2;
-        int fy = (screen_height - fh) / 2;
+        int fy = (screen_height - fh) / 2 + top_offset;
         animation_start(w, fx, fy, fw, fh, ANIMATION_DURATION);
         set_border_color(w, focus_color);
         set_border_width(w, border_width);
@@ -456,6 +532,7 @@ void toggle_floating(void) {
 void start_drag(Window w, int x, int y) {
     w = get_toplevel(w);
     if (w == None || w == root || !window_exists(w)) return;
+    if (is_dock_window(w)) return;
     animation_cancel(w);
     dragging = 1;
     drag_window = w;
@@ -520,6 +597,7 @@ int get_resize_direction(Window w, int root_x, int root_y) {
 }
 
 void start_resize(Window w, int root_x, int root_y) {
+    if (is_dock_window(w)) return;
     XWindowAttributes attr;
     if (!XGetWindowAttributes(dpy, w, &attr)) return;
     animation_cancel(w);
@@ -569,7 +647,7 @@ void do_resize(int root_x, int root_y) {
     if (new_w < MIN_WIDTH) new_w = MIN_WIDTH;
     if (new_h < MIN_HEIGHT) new_h = MIN_HEIGHT;
     if (new_x < 0) new_x = 0;
-    if (new_y < 0) new_y = 0;
+    if (new_y < top_offset) new_y = top_offset;
     if (new_x + new_w > screen_width) new_w = screen_width - new_x;
     if (new_y + new_h > screen_height) new_h = screen_height - new_y;
 
@@ -584,8 +662,6 @@ void stop_resize(void) {
     resize_window = None;
     resize_direction = 0;
 }
-
-// Config variables
 
 const char *get_var_value(const char *name) {
     for (int i = 0; i < num_vars; i++) {
@@ -649,11 +725,9 @@ int parse_action(const char *act) {
 void apply_opacity_rules(Window w) {
     if (!window_exists(w)) return;
 
-    // Get window title
     char *title = NULL;
     XFetchName(dpy, w, &title);
 
-    // Get window class (optional)
     XClassHint class_hint;
     int has_class = XGetClassHint(dpy, w, &class_hint);
     char *class_name = has_class ? class_hint.res_name : NULL;
@@ -661,12 +735,9 @@ void apply_opacity_rules(Window w) {
 
     for (int i = 0; i < num_opacity_rules; i++) {
         int match = 0;
-        if (title && strcasestr(title, opacity_rules[i].pattern))
-            match = 1;
-        if (!match && class_name && strcasestr(class_name, opacity_rules[i].pattern))
-            match = 1;
-        if (!match && class_class && strcasestr(class_class, opacity_rules[i].pattern))
-            match = 1;
+        if (title && strcasestr(title, opacity_rules[i].pattern)) match = 1;
+        if (!match && class_name && strcasestr(class_name, opacity_rules[i].pattern)) match = 1;
+        if (!match && class_class && strcasestr(class_class, opacity_rules[i].pattern)) match = 1;
 
         if (match) {
             unsigned long opacity_val = (unsigned long)(opacity_rules[i].opacity * 0xffffffffUL);
@@ -719,7 +790,6 @@ void parse_config_line(char *line) {
             num_startup_commands++;
         }
     } else if (strcmp(name, "opacity") == 0) {
-        // Format: opacity "pattern" 0.8
         char *pattern_start = strchr(value, '"');
         if (!pattern_start) return;
         pattern_start++;
@@ -759,9 +829,7 @@ void parse_config_line(char *line) {
         for (int i = 0; key_lower[i]; i++) key_lower[i] = tolower(key_lower[i]);
 
         KeySym keysym = XStringToKeysym(key_lower);
-        if (keysym == NoSymbol) {
-            keysym = XStringToKeysym(keystr);
-        }
+        if (keysym == NoSymbol) keysym = XStringToKeysym(keystr);
         if (keysym == NoSymbol) {
             fprintf(stderr, "Zelpy: Unknown key '%s'\n", keystr);
             return;
@@ -784,20 +852,20 @@ void parse_config_line(char *line) {
                 if (args) {
                     char expanded[256];
                     expand_variables(args, expanded, sizeof(expanded));
-                    strncpy(keybinds[num_keybinds].command, expanded, 255);
+                    snprintf(keybinds[num_keybinds].command,
+                             sizeof(keybinds[num_keybinds].command),
+                             "%s", expanded);
                 }
             } else if (action == ACTION_WORKSPACE) {
                 if (args) {
                     int ws = atoi(args);
-                    if (ws >= 1 && ws <= MAX_WORKSPACES) {
+                    if (ws >= 1 && ws <= MAX_WORKSPACES)
                         keybinds[num_keybinds].workspace_num = ws;
-                    }
                 }
             }
             num_keybinds++;
         }
     } else {
-        // Variable definition
         if (num_vars < MAX_VARS) {
             strncpy(var_names[num_vars], name, 63);
             strncpy(var_values[num_vars], value, 255);
@@ -821,10 +889,7 @@ void load_config(void) {
     FILE *f = fopen(path, "r");
     if (!f) {
         f = fopen(path, "w");
-        if (!f) {
-            fprintf(stderr, "Zelpy: Cannot create config file %s\n", path);
-            return;
-        }
+        if (!f) return;
         fprintf(f,
             "# Zelpy default config\n"
             "border_width 2\n"
@@ -833,7 +898,10 @@ void load_config(void) {
             "terminal st\n"
             "\n"
             "execute \"feh --bg-fill ~/wallpaper.jpg\"\n"
-            "execute \"(sleep 2 && xcompmgr -c -s) &\"\n"
+            "execute \"xcompmgr -c -s &\"\n"
+            "execute \"zelpane &\"\n"
+            "\n"
+            "# opacity \"firefox\" 0.9\n"
             "\n"
             "keybind Mod1-Return spawn @terminal\n"
             "keybind Mod1-t close\n"
@@ -861,9 +929,8 @@ void load_config(void) {
     num_vars = 0;
     num_opacity_rules = 0;
     char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    while (fgets(line, sizeof(line), f))
         parse_config_line(line);
-    }
     fclose(f);
 
     fprintf(stderr, "Zelpy: Loaded %d keybinds, %d startup commands, %d vars, %d opacity rules\n",
@@ -893,7 +960,6 @@ void grab_keys(void) {
 
 void apply_config(void) {
     grab_keys();
-    // Apply opacity rules to all existing managed windows
     for (int i = 0; i < num_managed; i++) {
         if (window_exists(managed_windows[i]))
             apply_opacity_rules(managed_windows[i]);
@@ -907,29 +973,26 @@ void sighup_handler(int sig) {
     update_highlight();
 }
 
-// Workspace handling
-
 void switch_workspace(int ws) {
     if (ws < 1 || ws > MAX_WORKSPACES) return;
     if (ws == current_workspace) return;
     current_workspace = ws;
+    broadcast_workspace();
 
     for (int i = 0; i < num_managed; i++) {
         Window w = managed_windows[i];
         if (!window_exists(w)) continue;
-        if (managed_workspace[i] != current_workspace) {
+        if (managed_workspace[i] != current_workspace)
             XUnmapWindow(dpy, w);
-        } else {
+        else
             XMapWindow(dpy, w);
-        }
     }
     XFlush(dpy);
     tile_windows();
     update_focus_from_pointer();
     raise_floating_windows();
+    raise_docks();
 }
-
-// Setup and run
 
 void setup(void) {
     dpy = XOpenDisplay(NULL);
@@ -953,6 +1016,12 @@ void setup(void) {
     net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
     net_wm_window_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
     net_wm_window_opacity = XInternAtom(dpy, "_NET_WM_WINDOW_OPACITY", False);
+    net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
+    zelpy_workspace_atom = XInternAtom(dpy, "_ZELPY_CURRENT_WORKSPACE", False);
+    zelpy_cmd_workspace = XInternAtom(dpy, "_ZELPY_CMD_WORKSPACE", False);
+    zelpy_cmd_reload = XInternAtom(dpy, "_ZELPY_CMD_RELOAD", False);
+    zelpy_cmd_retile = XInternAtom(dpy, "_ZELPY_CMD_RETILE", False);
+    zelpy_cmd_quit = XInternAtom(dpy, "_ZELPY_CMD_QUIT", False);
 
     Cursor cursor = XCreateFontCursor(dpy, XC_left_ptr);
     XDefineCursor(dpy, root, cursor);
@@ -964,6 +1033,8 @@ void setup(void) {
 
     load_config();
     apply_config();
+    update_struts();
+    broadcast_workspace();
     spawn_startup_commands();
 
     XGrabButton(dpy, Button1, SUPERKEY, root, True,
@@ -977,6 +1048,8 @@ void setup(void) {
 }
 
 void tile_windows(void) {
+    update_struts();
+
     Window visible[128];
     int count = 0;
 
@@ -988,24 +1061,25 @@ void tile_windows(void) {
         if (is_floating(w)) continue;
         XWindowAttributes attr;
         if (XGetWindowAttributes(dpy, w, &attr)) {
-            if (attr.map_state == IsViewable && !attr.override_redirect) {
+            if (attr.map_state == IsViewable && !attr.override_redirect)
                 visible[count++] = w;
-            }
         }
     }
 
     if (count > 0) {
+        int avail_height = screen_height - top_offset;
         int width = screen_width / count;
         for (int i = 0; i < count; i++) {
             int target_x = i * width;
-            int target_y = 0;
-            int target_w = width - 2*border_width;
-            int target_h = screen_height - 2*border_width;
+            int target_y = top_offset;
+            int target_w = width - 2 * border_width;
+            int target_h = avail_height - 2 * border_width;
             animation_start(visible[i], target_x, target_y, target_w, target_h, ANIMATION_DURATION);
             set_border_width(visible[i], border_width);
         }
     }
     raise_floating_windows();
+    raise_docks();
 }
 
 void spawn(const char *cmd) {
@@ -1044,18 +1118,10 @@ void run(void) {
                                     close_window(w);
                                 break;
                             }
-                            case ACTION_TOGGLE_FLOATING:
-                                toggle_floating();
-                                break;
-                            case ACTION_TOGGLE_FULLSCREEN:
-                                toggle_fullscreen();
-                                break;
-                            case ACTION_QUIT:
-                                exit(0);
-                                break;
-                            case ACTION_WORKSPACE:
-                                switch_workspace(keybinds[i].workspace_num);
-                                break;
+                            case ACTION_TOGGLE_FLOATING: toggle_floating(); break;
+                            case ACTION_TOGGLE_FULLSCREEN: toggle_fullscreen(); break;
+                            case ACTION_QUIT: exit(0); break;
+                            case ACTION_WORKSPACE: switch_workspace(keybinds[i].workspace_num); break;
                         }
                         break;
                     }
@@ -1065,19 +1131,17 @@ void run(void) {
             case ButtonPress:
                 if (ev.xbutton.button == Button1) {
                     Window w = get_window_under_cursor();
-                    if (w != None && w != root && window_exists(w)) {
+                    if (w != None && w != root && window_exists(w) && !is_dock_window(w)) {
                         if (ev.xbutton.state & SUPERKEY) {
-                            if (is_floating(w)) {
+                            if (is_floating(w))
                                 start_drag(w, ev.xbutton.x_root, ev.xbutton.y_root);
-                            }
                         }
                     }
                 } else if (ev.xbutton.button == Button3) {
                     Window w = get_window_under_cursor();
-                    if (w != None && w != root && (ev.xbutton.state & SUPERKEY)) {
-                        if (is_floating(w)) {
+                    if (w != None && w != root && (ev.xbutton.state & SUPERKEY) && !is_dock_window(w)) {
+                        if (is_floating(w))
                             start_resize(w, ev.xbutton.x_root, ev.xbutton.y_root);
-                        }
                     }
                 }
                 break;
@@ -1094,6 +1158,7 @@ void run(void) {
                 add_managed_window(ev.xmaprequest.window);
                 tile_windows();
                 raise_floating_windows();
+                raise_docks();
                 break;
             case ConfigureRequest:
                 XConfigureWindow(dpy, ev.xconfigurerequest.window,
@@ -1107,20 +1172,36 @@ void run(void) {
                                      .sibling = ev.xconfigurerequest.above,
                                      .stack_mode = ev.xconfigurerequest.detail
                                  });
+                raise_docks();
                 break;
             case ClientMessage:
                 if (ev.xclient.message_type == net_wm_state) {
                     if ((Atom)ev.xclient.data.l[1] == net_wm_state_fullscreen ||
                         (Atom)ev.xclient.data.l[2] == net_wm_state_fullscreen) {
                         Window w = ev.xclient.window;
-                        if (w != None && window_exists(w)) {
-                            if (ev.xclient.data.l[0] == 1) {
-                                enter_fullscreen(w);
-                            } else {
-                                exit_fullscreen(w);
-                            }
+                        if (w != None && window_exists(w) && !is_dock_window(w)) {
+                            if (ev.xclient.data.l[0] == 1) enter_fullscreen(w);
+                            else exit_fullscreen(w);
                         }
                     }
+                }
+                else if (ev.xclient.message_type == zelpy_cmd_workspace) {
+                    int ws = (int)ev.xclient.data.l[0];
+                    switch_workspace(ws);
+                }
+                else if (ev.xclient.message_type == zelpy_cmd_reload) {
+                    load_config();
+                    apply_config();
+                    update_highlight();
+                    fprintf(stderr, "Zelpy: config reloaded via zelpyctl\n");
+                }
+                else if (ev.xclient.message_type == zelpy_cmd_retile) {
+                    tile_windows();
+                    fprintf(stderr, "Zelpy: retiled via zelpyctl\n");
+                }
+                else if (ev.xclient.message_type == zelpy_cmd_quit) {
+                    fprintf(stderr, "Zelpy: quit via zelpyctl\n");
+                    exit(0);
                 }
                 break;
             case DestroyNotify:
@@ -1131,16 +1212,22 @@ void run(void) {
                 remove_managed_window(ev.xdestroywindow.window);
                 remove_floating(ev.xdestroywindow.window);
                 animation_cancel(ev.xdestroywindow.window);
+                tile_windows();
                 break;
             case UnmapNotify:
                 if (ev.xunmap.window == fullscreen_window) fullscreen_window = None;
-                // Do NOT remove managed/floating state here, because UnmapNotify
-                // is also sent when we hide windows during workspace switching.
                 tile_windows();
                 break;
             }
         }
         update_focus_from_pointer();
+
+        static int raise_tick = 0;
+        raise_tick++;
+        if (raise_tick >= 50) {
+            raise_tick = 0;
+            raise_docks();
+        }
 
         struct timespec now_ts;
         clock_gettime(CLOCK_MONOTONIC, &now_ts);
