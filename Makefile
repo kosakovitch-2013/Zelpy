@@ -3,6 +3,8 @@ CFLAGS  = -Wall -Wextra -O2
 LDFLAGS = -lX11 -lxcb -Wl,-rpath-link,/usr/lib # kot from github here, but i added these because some lfs' ld cannot find the libraries on their own so we basically help ld by adding this and it adds "compability" layer i guess.
 PREFIX  = /usr/local
 
+.DEFAULT_GOAL := all
+
 all: zelpy zelpane zelpyctl
 
 zelpy: wm.c animation.c animation.h

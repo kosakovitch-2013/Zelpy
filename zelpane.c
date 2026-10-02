@@ -29,22 +29,17 @@ static unsigned long parse_color(Display *dpy, int screen, const char *hex) {
     return color.pixel;
 }
 
-static int get_current_workspace(Display *dpy, Window root) {
-    Atom ws_atom = XInternAtom(dpy, "_ZELPY_CURRENT_WORKSPACE", False);
-    Atom actual_type;
-    int actual_format;
-    unsigned long nitems, bytes_after;
+static int get_cardinal_prop(Display *dpy, Window root, const char *name, int fallback) {
+    Atom a = XInternAtom(dpy, name, False);
+    Atom type; int fmt; unsigned long n, b;
     unsigned char *data = NULL;
-    int ws = 1;
-    if (XGetWindowProperty(dpy, root, ws_atom, 0, 1, False, XA_CARDINAL,
-                           &actual_type, &actual_format, &nitems, &bytes_after,
-                           &data) == Success && data) {
-        if (nitems >= 1) {
-            ws = (int)(*(long *)data);
-        }
+    int result = fallback;
+    if (XGetWindowProperty(dpy, root, a, 0, 1, False, XA_CARDINAL,
+                           &type, &fmt, &n, &b, &data) == Success && data) {
+        if (n >= 1) result = (int)(*(long *)data);
         XFree(data);
     }
-    return ws;
+    return result;
 }
 
 static void load_config(void) {
@@ -141,7 +136,6 @@ int main(void) {
                     (unsigned char *)partial, 12);
 
     XSelectInput(dpy, win, ExposureMask);
-    // Also watch root for workspace changes
     XSelectInput(dpy, root, PropertyChangeMask);
 
     XMapWindow(dpy, win);
@@ -151,6 +145,7 @@ int main(void) {
     if (font) XSetFont(dpy, gc, font->fid);
 
     Atom zelpy_ws_atom = XInternAtom(dpy, "_ZELPY_CURRENT_WORKSPACE", False);
+    Atom zelpy_layout_atom = XInternAtom(dpy, "_ZELPY_CURRENT_LAYOUT", False);
 
     time_t last_sec = 0;
     while (1) {
@@ -176,9 +171,15 @@ int main(void) {
             int tw = font ? XTextWidth(font, buf, strlen(buf)) : (int)strlen(buf) * 6;
             XDrawString(dpy, win, gc, (sw - tw) / 2, baseline, buf, strlen(buf));
 
-            int ws_num = get_current_workspace(dpy, root);
-            char right[32];
+            // Right side: workspace + layout
+            int ws_num = get_cardinal_prop(dpy, root, "_ZELPY_CURRENT_WORKSPACE", 1);
+            int layout = get_cardinal_prop(dpy, root, "_ZELPY_CURRENT_LAYOUT", 0);
+            const char *layout_names[] = { "horiz", "vert", "dwindle", "master" };
+            const char *lname = (layout >= 0 && layout <= 3) ? layout_names[layout] : "?";
+
+            char right[64];
             snprintf(right, sizeof(right), " ws %d ", ws_num);
+
             int rw = font ? XTextWidth(font, right, strlen(right)) : (int)strlen(right) * 6;
             XDrawString(dpy, win, gc, sw - rw - 6, baseline, right, strlen(right));
 
@@ -190,12 +191,14 @@ int main(void) {
             XNextEvent(dpy, &ev);
             if (ev.type == Expose && ev.xexpose.count == 0) {
                 last_sec = 0;
-            } else if (ev.type == PropertyNotify && ev.xproperty.atom == zelpy_ws_atom) {
-                last_sec = 0;  // force redraw immediately
+            } else if (ev.type == PropertyNotify &&
+                       (ev.xproperty.atom == zelpy_ws_atom ||
+                        ev.xproperty.atom == zelpy_layout_atom)) {
+                last_sec = 0;
             }
         }
 
-        struct timeval tv = { 0, 200000 };  // 200ms poll for responsiveness
+        struct timeval tv = { 0, 200000 }; // 200ms poll
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(ConnectionNumber(dpy), &fds);
