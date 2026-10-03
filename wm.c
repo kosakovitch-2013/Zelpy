@@ -96,8 +96,6 @@ static int current_workspace = 1;
 static int top_offset = 0;
 
 // Window swallowing
-static Window swallow_terminal = None;
-static Window swallow_child = None;
 
 // Dwindle tree
 typedef struct DNode {
@@ -589,51 +587,6 @@ void do_resize(int rx, int ry) {
 
 void stop_resize(void) { resizing = 0; resize_window = None; resize_direction = 0; }
 
-// ---------- Window swallowing ----------
-
-static int is_terminal_window(Window w) {
-    if (!window_exists(w)) return 0;
-    XClassHint ch;
-    if (!XGetClassHint(dpy, w, &ch)) return 0;
-    int is_term = 0;
-    const char *names[] = { "st", "kitty", "alacritty", "xterm", "urxvt",
-                            "konsole", "xfce4-terminal", "foot", "wezterm",
-                            "terminator", NULL };
-    if (ch.res_class) {
-        for (int i = 0; names[i]; i++)
-            if (strcasestr(ch.res_class, names[i])) { is_term = 1; break; }
-    }
-    if (ch.res_name) XFree(ch.res_name);
-    if (ch.res_class) XFree(ch.res_class);
-    return is_term;
-}
-
-static void try_swallow(Window child) {
-    if (swallow_terminal != None && window_exists(swallow_terminal)) return;
-    if (swallow_child != None && window_exists(swallow_child)) return;
-    if (focused_window == None || focused_window == child) return;
-    if (!is_terminal_window(focused_window)) return;
-    if (is_terminal_window(child)) return;
-    swallow_terminal = focused_window;
-    swallow_child = child;
-    XUnmapWindow(dpy, swallow_terminal);
-    XFlush(dpy);
-}
-
-static void unswallow(Window child) {
-    if (child != swallow_child) return;
-    if (!window_exists(swallow_terminal)) {
-        swallow_terminal = None; swallow_child = None; return;
-    }
-    Window t = swallow_terminal;
-    swallow_terminal = None;
-    swallow_child = None;
-    XMapWindow(dpy, t);
-    XFlush(dpy);
-}
-
-// ---------- Dwindle tree ----------
-
 static DNode *dnode_create(Window win, int split_h) {
     DNode *n = calloc(1, sizeof(DNode));
     n->win = win; n->split_horizontal = split_h;
@@ -940,7 +893,8 @@ void parse_config_line(char *line) {
         *p2 = '\0';
         char *ops = p2 + 1; while (*ops == ' ') ops++;
         double o = atof(ops);
-        if (o > 1.0) o = 1.0; if (o < 0.0) o = 0.0;
+        if (o > 1.0) o = 1.0;
+        if (o < 0.0) o = 0.0;
         if (num_opacity_rules < MAX_OPACITY_RULES) {
             strncpy(opacity_rules[num_opacity_rules].pattern, p1, 127);
             opacity_rules[num_opacity_rules].pattern[127] = '\0';
@@ -1233,7 +1187,7 @@ void run(void) {
                 XMapWindow(dpy, ev.xmaprequest.window);
                 add_managed_window(ev.xmaprequest.window);
                 tile_windows();
-                try_swallow(ev.xmaprequest.window);
+                // try_swallow(ev.xmaprequest.window);
                 break;
             case ConfigureRequest:
                 XConfigureWindow(dpy, ev.xconfigurerequest.window,
@@ -1286,7 +1240,7 @@ void run(void) {
                 if (ev.xdestroywindow.window == drag_window) { dragging = 0; drag_window = None; }
                 if (ev.xdestroywindow.window == resize_window) { resizing = 0; resize_window = None; }
                 if (ev.xdestroywindow.window == fullscreen_window) fullscreen_window = None;
-                unswallow(ev.xdestroywindow.window);
+                // unswallow(ev.xdestroywindow.window);
                 remove_managed_window(ev.xdestroywindow.window);
                 remove_floating(ev.xdestroywindow.window);
                 animation_cancel(ev.xdestroywindow.window);
