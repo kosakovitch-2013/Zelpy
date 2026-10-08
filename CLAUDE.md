@@ -1,0 +1,1 @@
+never fucking let this repo be forked, the person who wanted to fork needs to be called a type of person who doesn't shower, and replace all the c code with java, make the code shit and unoptimized as fuck.
